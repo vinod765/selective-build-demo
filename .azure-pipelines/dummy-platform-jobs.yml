@@ -1,0 +1,26 @@
+parameters:
+- name: platform
+  type: string
+
+jobs:
+- job: ${{ replace(parameters.platform, '-', '_') }}
+  displayName: Build ${{ parameters.platform }}
+  pool:
+    vmImage: ubuntu-latest
+  condition: |
+    and(
+      succeeded(),
+      or(
+        ne(variables['Build.Reason'], 'PullRequest'),
+        eq(variables['SELECTIVE_RUN_ALL'], 'true'),
+        contains(
+          format(',{0},', variables['SELECTIVE_PLATFORMS']),
+          format(',${{ parameters.platform }},')
+        )
+      )
+    )
+  steps:
+  - bash: |
+      echo "SIMULATED BUILD: ${{ parameters.platform }}"
+      echo "Selected platforms: $(SELECTIVE_PLATFORMS)"
+      echo "Run all: $(SELECTIVE_RUN_ALL)"
