@@ -1,0 +1,50 @@
+name: Queue Azure full PR build
+
+on:
+  issue_comment:
+    types:
+      - created
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  queue-full-build:
+    if: >
+      github.event.issue.pull_request != null &&
+      contains(github.event.comment.body, '/azp run-all Azure.selective-build-demo')
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check commenter permission
+      env:
+        ASSOCIATION: ${{ github.event.comment.author_association }}
+      run: |
+        set -euo pipefail
+        case "$ASSOCIATION" in
+          OWNER|MEMBER|COLLABORATOR) echo "Authorized commenter: $ASSOCIATION" ;;
+          *) echo "::error::Commenter is not authorized"; exit 1 ;;
+        esac
+    - name: Queue Azure pipeline
+      env:
+        AZURE_DEVOPS_ORG: ${{ vars.AZURE_DEVOPS_ORG }}
+        AZURE_DEVOPS_PROJECT: ${{ vars.AZURE_DEVOPS_PROJECT }}
+        AZURE_DEVOPS_PIPELINE_ID: ${{ vars.AZURE_DEVOPS_PIPELINE_ID }}
+        AZURE_DEVOPS_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
+        PR_NUMBER: ${{ github.event.issue.number }}
+      run: |
+        set -euo pipefail
+        : "${AZURE_DEVOPS_ORG:?Missing AZURE_DEVOPS_ORG}"
+        : "${AZURE_DEVOPS_PROJECT:?Missing AZURE_DEVOPS_PROJECT}"
+        : "${AZURE_DEVOPS_PIPELINE_ID:?Missing AZURE_DEVOPS_PIPELINE_ID}"
+        : "${AZURE_DEVOPS_PAT:?Missing AZURE_DEVOPS_PAT}"
+        api_url="https://dev.azure.com/${AZURE_DEVOPS_ORG}/${AZURE_DEVOPS_PROJECT}/_apis/build/builds?api-version=7.1"
+        python3 - <<'PY' > request.json
+        import json, os
+        print(json.dumps({
+            "definition": {"id": int(os.environ["AZURE_DEVOPS_PIPELINE_ID"])},
+            "sourceBranch": f"refs/pull/{os.environ['PR_NUMBER']}/merge",
+            "templateParameters": json.dumps({"SELECTIVE_MODE": "all"}),
+        }))
+        PY
+        curl --fail-with-body --silent --show-error --user ":${AZURE_DEVOPS_PAT}" --header "Content-Type: application/json" --data @request.json "$api_url"
