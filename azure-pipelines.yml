@@ -1,0 +1,105 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+parameters:
+- name: SELECTIVE_MODE
+  type: string
+  default: path
+  values:
+  - path
+  - all
+
+variables:
+- name: EFFECTIVE_SELECTIVE_MODE
+  value: ${{ parameters.SELECTIVE_MODE }}
+
+stages:
+- stage: SelectiveDecision
+  displayName: Selective path decision
+  dependsOn: []
+  jobs:
+  - job: determine_scope
+    displayName: Determine affected platforms
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - checkout: self
+      fetchDepth: 0
+    - bash: |
+        set -euo pipefail
+        if [ "$(Build.Reason)" = "PullRequest" ]; then
+          target="$(System.PullRequest.TargetBranchName)"
+          git fetch --no-tags --prune origin "+refs/heads/${target}:refs/remotes/origin/${target}"
+          base="origin/${target}"
+          mode="${EFFECTIVE_SELECTIVE_MODE:-path}"
+        else
+          base="$(Build.SourceVersion)"
+          mode="all"
+        fi
+        python3 scripts/selective_build.py --base "$base" --head "$(Build.SourceVersion)" --mode "$mode" --output "$(Pipeline.Workspace)/selection.json"
+        cat "$(Pipeline.Workspace)/selection.json"
+        run_all="$(python3 -c "import json; print(str(json.load(open('$(Pipeline.Workspace)/selection.json'))['run_all']).lower())")"
+        run_vs_tests="$(python3 -c "import json; print(str(json.load(open('$(Pipeline.Workspace)/selection.json'))['run_vs_tests']).lower())")"
+        platforms="$(python3 -c "import json; print(','.join(json.load(open('$(Pipeline.Workspace)/selection.json'))['platforms']))")"
+        echo "Selected platforms: ${platforms}"
+        echo "##vso[task.setvariable variable=SELECTIVE_RUN_ALL;isOutput=true]${run_all}"
+        echo "##vso[task.setvariable variable=SELECTIVE_RUN_VS_TESTS;isOutput=true]${run_vs_tests}"
+        echo "##vso[task.setvariable variable=SELECTIVE_PLATFORMS;isOutput=true]${platforms}"
+      name: selection
+      displayName: Publish selection outputs
+
+- stage: Build
+  displayName: Simulated platform builds
+  dependsOn: SelectiveDecision
+  variables:
+  - name: SELECTIVE_RUN_ALL
+    value: $[ stageDependencies.SelectiveDecision.determine_scope.outputs['selection.SELECTIVE_RUN_ALL'] ]
+  - name: SELECTIVE_PLATFORMS
+    value: $[ stageDependencies.SelectiveDecision.determine_scope.outputs['selection.SELECTIVE_PLATFORMS'] ]
+  jobs:
+  - template: .azure-pipelines/dummy-platform-jobs.yml
+    parameters:
+      platform: broadcom
+  - template: .azure-pipelines/dummy-platform-jobs.yml
+    parameters:
+      platform: mellanox
+  - template: .azure-pipelines/dummy-platform-jobs.yml
+    parameters:
+      platform: marvell-prestera-arm64
+  - template: .azure-pipelines/dummy-platform-jobs.yml
+    parameters:
+      platform: marvell-prestera-armhf
+  - template: .azure-pipelines/dummy-platform-jobs.yml
+    parameters:
+      platform: nvidia-bluefield
+  - template: .azure-pipelines/dummy-platform-jobs.yml
+    parameters:
+      platform: aspeed-arm64
+  - template: .azure-pipelines/dummy-platform-jobs.yml
+    parameters:
+      platform: vs
+
+- stage: Test
+  displayName: Simulated VS tests
+  dependsOn:
+  - SelectiveDecision
+  - Build
+  variables:
+  - name: SELECTIVE_RUN_VS_TESTS
+    value: $[ stageDependencies.SelectiveDecision.determine_scope.outputs['selection.SELECTIVE_RUN_VS_TESTS'] ]
+  condition: |
+    and(succeeded(), or(ne(variables['Build.Reason'], 'PullRequest'), eq(variables['SELECTIVE_RUN_VS_TESTS'], 'true')))
+  jobs:
+  - job: vs_tests
+    displayName: Test vs
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - bash: echo "SIMULATED TESTS: vs"
