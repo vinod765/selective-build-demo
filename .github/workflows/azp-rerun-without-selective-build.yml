@@ -1,0 +1,151 @@
+name: Queue Azure full PR rerun
+
+on:
+  issue_comment:
+    types:
+    - created
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  queue-full-rerun:
+    if: >
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/azp rerun Azure.selective-build-demo'
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Validate Azure configuration
+      shell: bash
+      env:
+        AZURE_DEVOPS_ORG: ${{ vars.AZURE_DEVOPS_ORG }}
+        AZURE_DEVOPS_PROJECT: ${{ vars.AZURE_DEVOPS_PROJECT }}
+        AZURE_DEVOPS_PIPELINE_ID: ${{ vars.AZURE_DEVOPS_PIPELINE_ID }}
+        AZURE_DEVOPS_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
+      run: |
+        set -euo pipefail
+
+        missing=0
+
+        for variable in \
+          AZURE_DEVOPS_ORG \
+          AZURE_DEVOPS_PROJECT \
+          AZURE_DEVOPS_PIPELINE_ID \
+          AZURE_DEVOPS_PAT
+        do
+          if [ -z "${!variable:-}" ]; then
+            echo "::error::Missing required configuration: ${variable}"
+            missing=1
+          fi
+        done
+
+        if [ "$missing" -ne 0 ]; then
+          exit 1
+        fi
+
+    - name: Verify commenter permission
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const result =
+            await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.payload.comment.user.login
+            });
+
+          const allowed = ["admin", "maintain", "push", "triage"];
+
+          if (!allowed.includes(result.data.permission)) {
+            core.setFailed(
+              `User ${context.payload.comment.user.login} is not authorized to queue a full rerun.`
+            );
+            return;
+          }
+
+          core.info(
+            `Authorized commenter: ${context.payload.comment.user.login} (${result.data.permission})`
+          );
+
+    - name: Queue Azure full rerun
+      shell: bash
+      env:
+        AZURE_DEVOPS_ORG: ${{ vars.AZURE_DEVOPS_ORG }}
+        AZURE_DEVOPS_PROJECT: ${{ vars.AZURE_DEVOPS_PROJECT }}
+        AZURE_DEVOPS_PIPELINE_ID: ${{ vars.AZURE_DEVOPS_PIPELINE_ID }}
+        AZURE_DEVOPS_PAT: ${{ secrets.AZURE_DEVOPS_PAT }}
+        PR_NUMBER: ${{ github.event.issue.number }}
+      run: |
+        set -euo pipefail
+
+        api_url="https://dev.azure.com/${AZURE_DEVOPS_ORG}/${AZURE_DEVOPS_PROJECT}/_apis/build/builds?api-version=7.1"
+
+        request_body="$(
+          python3 - <<'PY'
+        import json
+        import os
+
+        payload = {
+            "definition": {
+                "id": int(os.environ["AZURE_DEVOPS_PIPELINE_ID"])
+            },
+            "sourceBranch": (
+                f"refs/pull/{os.environ['PR_NUMBER']}/merge"
+            ),
+            "reason": "manual",
+            "message": (
+                "Maintainer requested a full rerun without selective builds."
+            ),
+            "templateParameters": {
+                "SELECTIVE_MODE": "all"
+            },
+        }
+
+        print(json.dumps(payload))
+        PY
+        )"
+
+        response_file="$(mktemp)"
+
+        status_code="$(
+          curl \
+            --silent \
+            --show-error \
+            --output "$response_file" \
+            --write-out '%{http_code}' \
+            --request POST \
+            --user ":${AZURE_DEVOPS_PAT}" \
+            --header "Content-Type: application/json" \
+            --data "$request_body" \
+            "$api_url"
+        )"
+
+        if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
+          echo "::error::Azure DevOps returned HTTP ${status_code}"
+          cat "$response_file"
+          exit 1
+        fi
+
+        build_id="$(
+          python3 - "$response_file" <<'PY'
+        import json
+        import sys
+
+        with open(sys.argv[1], encoding="utf-8") as file:
+            response = json.load(file)
+
+        print(response.get("id", ""))
+        PY
+        )"
+
+        if [ -z "$build_id" ]; then
+          echo "::error::Azure did not return a build ID."
+          cat "$response_file"
+          exit 1
+        fi
+
+        echo "Azure full rerun queued successfully."
+        echo "Azure build ID: ${build_id}"

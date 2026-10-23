@@ -1,0 +1,40 @@
+parameters:
+- name: platform
+  type: string
+
+jobs:
+- job: ${{ replace(parameters.platform, '-', '_') }}
+  displayName: Simulated build - ${{ parameters.platform }}
+  pool:
+    vmImage: ubuntu-latest
+
+  condition: |
+    and(
+      succeeded(),
+      or(
+        ne(variables['Build.Reason'], 'PullRequest'),
+        eq(variables['SELECTIVE_RUN_ALL'], 'true'),
+        contains(
+          format(',{0},', variables['SELECTIVE_PLATFORMS']),
+          format(',${{ parameters.platform }},')
+        )
+      )
+    )
+
+  steps:
+  - bash: |
+      set -euo pipefail
+
+      echo "========================================"
+      echo "SIMULATED BUILD"
+      echo "Platform: ${{ parameters.platform }}"
+      echo "Build reason: $(Build.Reason)"
+      echo "Run all: $(SELECTIVE_RUN_ALL)"
+      echo "Selected platforms: $(SELECTIVE_PLATFORMS)"
+      echo "========================================"
+
+      # This intentionally does not perform a real SONiC build.
+      # The purpose of this repository is to verify job selection.
+      sleep 2
+
+      echo "Simulated build completed for ${{ parameters.platform }}"
